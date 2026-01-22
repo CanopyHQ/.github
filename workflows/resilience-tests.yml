@@ -1,0 +1,244 @@
+name: Resilience & Load Tests
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'cambium/internal/proxy/**'
+      - 'canopy/internal/storage/**'
+      - 'canopy/internal/health/**'
+      - 'petiole/src/petiole/core/queue.py'
+      - 'test/load/**'
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Run load tests nightly
+    - cron: '0 2 * * *'
+
+jobs:
+  unit-tests:
+    name: Unit Tests (Resilience Features)
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Install Go dependencies
+        run: |
+          cd cambium
+          go get github.com/prometheus/client_golang/prometheus
+          go get github.com/redis/go-redis/v9
+          go mod tidy
+      
+      - name: Test circuit breaker
+        run: |
+          cd cambium
+          go test -v -run TestCircuitBreaker ./internal/proxy/
+      
+      - name: Test distributed rate limiter
+        run: |
+          cd cambium
+          REDIS_URL=redis://localhost:6379 go test -v -run TestRedisRateLimiter ./internal/proxy/
+      
+      - name: Test AI cache
+        run: |
+          cd cambium
+          REDIS_URL=redis://localhost:6379 go test -v -run TestAIResponseCache ./internal/proxy/
+      
+      - name: Test connection pooling
+        run: |
+          cd canopy
+          go test -v -run TestConnectionPool ./internal/storage/
+  
+  python-queue-tests:
+    name: Python Queue Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          cd petiole
+          pip install redis pytest
+          pip install -e .
+      
+      - name: Test workflow queue
+        run: |
+          cd petiole
+          REDIS_URL=redis://localhost:6379 pytest -v tests/test_queue.py
+  
+  load-tests-quick:
+    name: Quick Load Test (PR)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+      
+      - name: Build cambium
+        run: |
+          cd cambium
+          go build -o ../cambium-server .
+      
+      - name: Start server in background
+        run: |
+          ./cambium-server proxy start --port 8080 &
+          sleep 5
+        env:
+          REDIS_URL: redis://localhost:6379
+      
+      - name: Run quick load test (100 users, 1 min)
+        run: |
+          cd test/load
+          BASE_URL=http://localhost:8080 k6 run --vus 100 --duration 1m github_action_burst.js
+  
+  load-tests-full:
+    name: Full Load Test (Nightly)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'push'
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+      
+      - name: Build cambium
+        run: |
+          cd cambium
+          go build -o ../cambium-server .
+      
+      - name: Start Prometheus metrics endpoint
+        run: |
+          ./cambium-server metrics --port 9090 &
+          sleep 2
+        env:
+          REDIS_URL: redis://localhost:6379
+      
+      - name: Start proxy server
+        run: |
+          ./cambium-server proxy start --port 8080 &
+          sleep 5
+        env:
+          REDIS_URL: redis://localhost:6379
+      
+      - name: Run full load test (viral spike scenario)
+        run: |
+          cd test/load
+          BASE_URL=http://localhost:8080 k6 run github_action_burst.js
+      
+      - name: Check metrics endpoint
+        run: |
+          curl http://localhost:9090/metrics | grep cambium_http_requests_total
+      
+      - name: Save load test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-results
+          path: test/load/*.json
+  
+  degradation-test:
+    name: Graceful Degradation Test
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: canopy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Test connection pool limits
+        run: |
+          cd canopy
+          go test -v -run TestConnectionPoolExhaustion ./internal/storage/
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/canopy_test?sslmode=disable
+      
+      - name: Test graceful degradation
+        run: |
+          cd canopy
+          go test -v -run TestGracefulDegradation ./internal/health/
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/canopy_test?sslmode=disable
+
+

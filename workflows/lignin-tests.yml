@@ -1,0 +1,41 @@
+name: Lignin Quality Gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lignin-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Lignin Coverage Analysis
+        run: |
+          curl -X POST https://canopyhq.fly.dev/api/lignin/analyze \
+            -H "Authorization: Bearer ${{ secrets.LIGNIN_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"repo\": \"${{ github.repository }}\", \"sha\": \"${{ github.sha }}\"}"
+      
+      - name: Check Quality Gates
+        run: |
+          response=$(curl -s https://canopyhq.fly.dev/api/lignin/gates/${{ github.sha }} \
+            -H "Authorization: Bearer ${{ secrets.LIGNIN_TOKEN }}")
+          
+          passed=$(echo "$response" | jq -r '.passed // false')
+          
+          if [ "$passed" != "true" ]; then
+            echo "Quality gates failed"
+            echo "$response" | jq '.'
+            exit 1
+          fi
+      
+      - name: Generate Missing Tests
+        if: failure()
+        run: |
+          curl -X POST https://canopyhq.fly.dev/api/lignin/generate \
+            -H "Authorization: Bearer ${{ secrets.LIGNIN_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"sha\": \"${{ github.sha }}\", \"gaps\": true}"

@@ -1,0 +1,55 @@
+name: Chaos Validation
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Nightly at 3 AM UTC
+  workflow_dispatch:
+
+jobs:
+  chaos-experiments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      
+      - name: Run Provider Timeout Test
+        run: |
+          cd canopy/cambium
+          go test -v ./test/chaos/... -run TestProviderTimeout
+      
+      - name: Run Concurrent Load Test
+        run: |
+          cd canopy/cambium
+          go test -v ./test/chaos/... -run TestConcurrentRequests
+      
+      - name: Run Intermittent Failure Test
+        run: |
+          cd canopy/cambium
+          go test -v ./test/chaos/... -run TestIntermittentFailures
+      
+      - name: Validate Self-Healing
+        run: |
+          # Inject failure
+          curl -X POST https://canopy-guardian.fly.dev/api/chaos/inject \
+            -H "Authorization: Bearer ${{ secrets.GUARDIAN_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"type": "service_restart", "target": "cortex"}' || true
+          
+          # Wait for recovery
+          sleep 60
+          
+          # Verify system healthy
+          response=$(curl -s https://canopy-guardian.fly.dev/api/supervisor/status)
+          state=$(echo "$response" | jq -r '.state // "unknown"')
+          
+          if [ "$state" != "healthy" ]; then
+            echo "System not healthy after chaos injection"
+            echo "$response" | jq '.'
+            exit 1
+          fi
+          
+          echo "Self-healing validated: system recovered to healthy state"

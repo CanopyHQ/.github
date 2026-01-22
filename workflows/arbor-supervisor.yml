@@ -1,0 +1,19 @@
+name: Arbor Supervisor
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Health
+        run: |
+          CORTEX=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://canopy-cortex.fly.dev/health || echo "000")
+          CROWN=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://canopyhq.fly.dev/health || echo "000")
+          echo "Cortex: $CORTEX, Crown: $CROWN"
+      - name: Check Stuck PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues -q '.[] | select(.labels[].name == "arbor/executing") | .number' | head -5

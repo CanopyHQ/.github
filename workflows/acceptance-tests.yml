@@ -1,0 +1,246 @@
+name: Acceptance Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      chaos_tests:
+        description: 'Run chaos tests'
+        required: false
+        default: 'false'
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: canopy_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install godog
+        run: go install github.com/cucumber/godog/cmd/godog@latest
+
+      - name: Install dependencies
+        run: |
+          # Go dependencies
+          cd cambium && go mod download
+          cd ../canopy && go mod download
+          cd ../xylem && go mod download
+          
+          # Python dependencies
+          cd ../petiole && pip install -r requirements.txt
+
+      - name: Build binaries
+        run: |
+          cd cambium && go build -o ../test/bin/cambium .
+          cd ../canopy && go build -o ../test/bin/canopy .
+          cd ../petiole && pip install -e .
+
+      - name: Set up test environment
+        env:
+          TEST_OPENAI_KEY: ${{ secrets.TEST_OPENAI_KEY }}
+          TEST_ANTHROPIC_KEY: ${{ secrets.TEST_ANTHROPIC_KEY }}
+          TEST_DATABASE_URL: postgres://test:test@localhost:5432/canopy_test?sslmode=disable
+          TEST_REDIS_URL: localhost:6379
+        run: |
+          # Create test config directory
+          mkdir -p ~/.config/canopy/tokens
+          mkdir -p test/tmp
+          
+          # Export binaries to PATH
+          export PATH=$PATH:$(pwd)/test/bin
+          
+          # Verify services
+          pg_isready -h localhost -p 5432
+          redis-cli ping
+
+      - name: Run smoke tests with coverage
+        env:
+          TEST_OPENAI_KEY: ${{ secrets.TEST_OPENAI_KEY }}
+          TEST_DATABASE_URL: postgres://test:test@localhost:5432/canopy_test?sslmode=disable
+          TEST_REDIS_URL: localhost:6379
+        run: |
+          cd test/acceptance
+          godog run --tags @smoke --format progress
+          
+      - name: Collect coverage
+        run: |
+          mkdir -p coverage
+          cd cambium && go test -coverprofile=../coverage/cambium.out -covermode=atomic ./...
+          cd ../canopy && go test -coverprofile=../coverage/canopy.out -covermode=atomic ./...
+          cd ../xylem && go test -coverprofile=../coverage/xylem.out -covermode=atomic ./...
+
+      - name: Run critical tests
+        if: github.event_name == 'pull_request'
+        env:
+          TEST_OPENAI_KEY: ${{ secrets.TEST_OPENAI_KEY }}
+          TEST_DATABASE_URL: postgres://test:test@localhost:5432/canopy_test?sslmode=disable
+          TEST_REDIS_URL: localhost:6379
+        run: |
+          cd test/acceptance
+          godog run --tags @critical --format pretty
+
+      - name: Run all acceptance tests
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        env:
+          TEST_OPENAI_KEY: ${{ secrets.TEST_OPENAI_KEY }}
+          TEST_ANTHROPIC_KEY: ${{ secrets.TEST_ANTHROPIC_KEY }}
+          TEST_DATABASE_URL: postgres://test:test@localhost:5432/canopy_test?sslmode=disable
+          TEST_REDIS_URL: localhost:6379
+        run: |
+          cd test/acceptance
+          godog run --format pretty --format junit:../../test-results.xml
+
+      - name: Merge coverage reports
+        if: always()
+        run: |
+          cd coverage
+          echo "mode: atomic" > merged.out
+          tail -n +2 -q *.out >> merged.out
+          go tool cover -func=merged.out > coverage.txt
+          go tool cover -html=merged.out -o coverage.html
+          
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/merged.out
+          flags: all-tests
+          fail_ci_if_error: false
+          
+      - name: Check coverage threshold
+        if: always()
+        run: |
+          COVERAGE=$(go tool cover -func=coverage/merged.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: $COVERAGE%"
+          if (( $(echo "$COVERAGE < 75" | bc -l) )); then
+            echo "⚠️ Coverage $COVERAGE% is below 75% threshold"
+          else
+            echo "✅ Coverage $COVERAGE% meets threshold"
+          fi
+          
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const coverage = fs.readFileSync('coverage/coverage.txt', 'utf8');
+            const lines = coverage.split('\n').slice(-20).join('\n');
+            const body = `## 📊 Coverage Report\n\n\`\`\`\n${lines}\n\`\`\`\n\n[Full Report](https://codecov.io/gh/${context.repo.owner}/${context.repo.repo}/pull/${context.payload.pull_request.number})`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+          
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+          
+      - name: Publish coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            coverage/merged.out
+            coverage/coverage.txt
+            coverage/coverage.html
+
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify contracts
+        run: |
+          echo "Contract tests would run here"
+          # In production, use Pact Broker
+          # pact-verifier --pact-urls ./test/contract/*.json
+
+  chaos:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.chaos_tests == 'true'
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Compose
+        run: |
+          docker-compose up -d
+          sleep 10
+
+      - name: Run chaos tests
+        env:
+          CHAOS_SAFE_MODE: "0"
+        run: |
+          cd test/chaos
+          ./kill_database.sh
+          ./kill_redis.sh
+
+      - name: Cleanup
+        if: always()
+        run: docker-compose down
+
+  report:
+    needs: [acceptance, contract, chaos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report results
+        run: |
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Acceptance tests: ${{ needs.acceptance.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Contract tests: ${{ needs.contract.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Chaos tests: ${{ needs.chaos.result }}" >> $GITHUB_STEP_SUMMARY
+

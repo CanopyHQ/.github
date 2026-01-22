@@ -1,0 +1,149 @@
+# Canopy GitHub Action
+# Reference implementation for canopy-ai/setup action
+
+name: 'Canopy AI Platform'
+description: 'AI governance, workflows, and automation in one step'
+author: 'Canopy AI'
+
+branding:
+  icon: 'cpu'
+  color: 'green'
+
+inputs:
+  config:
+    description: 'Path to Canopy config file'
+    required: false
+    default: '.canopy/config.yaml'
+  
+  version:
+    description: 'Canopy version to use'
+    required: false
+    default: 'latest'
+  
+  budget-alert:
+    description: 'Alert threshold for budget (percentage)'
+    required: false
+    default: '80'
+  
+  openai-api-key:
+    description: 'OpenAI API key (optional, can use GitHub secret)'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Canopy
+      shell: bash
+      run: |
+        echo "🌳 Setting up Canopy..."
+        
+        # Detect OS and architecture
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        
+        # Map architecture names
+        case $ARCH in
+          x86_64) ARCH="amd64" ;;
+          aarch64) ARCH="arm64" ;;
+        esac
+        
+        VERSION="${{ inputs.version }}"
+        if [ "$VERSION" = "latest" ]; then
+          VERSION=$(curl -s https://api.github.com/repos/DuncanRose/canopy/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+        fi
+        
+        # Download Canopy binary
+        DOWNLOAD_URL="https://github.com/DuncanRose/canopy/releases/download/${VERSION}/canopy-${OS}-${ARCH}"
+        echo "📥 Downloading Canopy ${VERSION} for ${OS}/${ARCH}..."
+        curl -fsSL "$DOWNLOAD_URL" -o /tmp/canopy
+        chmod +x /tmp/canopy
+        sudo mv /tmp/canopy /usr/local/bin/canopy
+        
+        # Download Cambium (AI governance)
+        CAMBIUM_URL="https://github.com/DuncanRose/cambium/releases/download/${VERSION}/cambium-${OS}-${ARCH}"
+        echo "📥 Downloading Cambium ${VERSION}..."
+        curl -fsSL "$CAMBIUM_URL" -o /tmp/cambium
+        chmod +x /tmp/cambium
+        sudo mv /tmp/cambium /usr/local/bin/cambium
+        
+        # Verify installation
+        canopy --version
+        cambium --version
+        
+        echo "✓ Canopy installed successfully"
+    
+    - name: Initialize Canopy
+      shell: bash
+      run: |
+        echo "🔧 Initializing Canopy..."
+        
+        # Initialize with GitHub context
+        canopy init --ci \
+          --repo "${{ github.repository }}" \
+          --run-id "${{ github.run_id }}" \
+          --sha "${{ github.sha }}"
+        
+        # Load config if exists
+        if [ -f "${{ inputs.config }}" ]; then
+          echo "📋 Loading config from ${{ inputs.config }}"
+          canopy config load "${{ inputs.config }}"
+        else
+          echo "📋 Using default config"
+        fi
+        
+        echo "✓ Canopy initialized"
+    
+    - name: Setup AI Governance
+      shell: bash
+      env:
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+      run: |
+        echo "🛡️ Setting up AI governance..."
+        
+        # Start Cambium proxy
+        cambium proxy start --background --ci-mode
+        
+        # Configure budget alerts
+        cambium policy set budget.alert_threshold ${{ inputs.budget-alert }}
+        
+        # Export proxy URL for AI calls
+        echo "OPENAI_BASE_URL=http://localhost:8080/v1" >> $GITHUB_ENV
+        
+        echo "✓ AI governance active"
+    
+    - name: Run Workflows
+      shell: bash
+      run: |
+        echo "🚀 Running Canopy workflows..."
+        
+        # Determine which workflows to run based on trigger
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          echo "📝 Running PR workflows..."
+          canopy workflow run ai-code-review --pr ${{ github.event.pull_request.number }}
+        elif [ "${{ github.event_name }}" = "push" ]; then
+          echo "📝 Running push workflows..."
+          canopy workflow run auto-update-docs
+        fi
+        
+        echo "✓ Workflows completed"
+    
+    - name: Report Status
+      if: always()
+      shell: bash
+      run: |
+        echo "📊 Generating report..."
+        
+        # Get budget status
+        cambium policy show budget
+        
+        # Get workflow results
+        canopy workflow status --last
+        
+        # Post to PR if applicable
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          canopy report post-pr-comment ${{ github.event.pull_request.number }}
+        fi
+        
+        echo "✓ Report generated"
+
+
