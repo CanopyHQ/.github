@@ -1,0 +1,33 @@
+name: Dependabot Auto-Merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  dependabot-auto-merge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run tests
+        run: |
+          # Run tests for the affected module
+          if [ -f "canopy/go.mod" ]; then
+            cd canopy
+            go test ./... -v
+          fi
+          if [ -f "cortex/go.mod" ]; then
+            cd cortex
+            go test ./... -v
+          fi
+      
+      - name: Auto-merge Dependabot PRs
+        if: success()
+        uses: fastify/github-action-merge-dependabot@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          target: minor
+          merge-method: squash
+          approval-method: auto

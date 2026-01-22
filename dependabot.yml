@@ -1,0 +1,66 @@
+version: 2
+updates:
+  # Enable version updates for Go modules
+  - package-ecosystem: "gomod"
+    directory: "/canopy"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "CanopyHQ/arbor"
+    labels:
+      - "dependencies"
+      - "security"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    # Group updates to reduce PR noise
+    groups:
+      production-dependencies:
+        patterns:
+          - "github.com/**"
+          - "golang.org/**"
+          - "google.golang.org/**"
+      development-dependencies:
+        patterns:
+          - "github.com/stretchr/testify"
+          - "github.com/DATA-DOG/go-sqlmock"
+
+  # Enable version updates for Go modules in cortex
+  - package-ecosystem: "gomod"
+    directory: "/cortex"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "CanopyHQ/arbor"
+    labels:
+      - "dependencies"
+      - "security"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  # Enable version updates for npm (if any)
+  - package-ecosystem: "npm"
+    directory: "/canopy"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "CanopyHQ/arbor"
+    labels:
+      - "dependencies"
+      - "security"
+
+  # Enable version updates for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "CanopyHQ/arbor"
+    labels:
+      - "dependencies"
+      - "github-actions"
