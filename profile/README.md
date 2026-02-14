@@ -45,7 +45,7 @@ Your AI Tools (Cursor, Windsurf, Claude Code)
 ### Links
 
 - [Website](https://canopyhq.io)
-- [Support](https://canopyhq.io/support)
+- [Support](https://canopyhq.io/support) · support@canopyhq.io
 - [FAQ](https://canopyhq.io/faq)
 - [Releases](https://github.com/CanopyHQ/canopy-releases)
 
